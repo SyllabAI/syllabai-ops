@@ -1,0 +1,37 @@
+name: Google Sheet Dashboard
+
+# Refreshes the SyllabAI project & sync dashboard Google Sheet:
+#   - once daily at 02:43 UTC (08:43 Asia/Dhaka, before the 09:07 Discord pulse)
+#   - manually via Actions -> Run workflow
+# (Push trigger removed + cron reduced from every 6h to save private-repo
+#  Actions minutes. Re-add if you need fresher data.)
+# Writes: Overview (repo/sync/Drive state), Commits (append-only log),
+#         Sync Runs (recent run health). See scripts/dashboard/sync_dashboard.py.
+
+on:
+  schedule:
+    - cron: "43 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sheet-dashboard
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Refresh dashboard sheet
+        env:
+          GH_TOKEN: ${{ secrets.GH_DASHBOARD_TOKEN }}
+          OAUTH_BLOCK: ${{ secrets.GDRIVE_RCLONE_OAUTH }}
+          SHEET_ID: ${{ vars.GDRIVE_SHEET_ID }}
+          FOLDER_ID: ${{ vars.GDRIVE_FOLDER_ID }}
+        run: python3 scripts/dashboard/sync_dashboard.py

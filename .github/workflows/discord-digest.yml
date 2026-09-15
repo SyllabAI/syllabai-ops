@@ -1,0 +1,32 @@
+name: Discord Daily Pulse
+
+# Posts a once-a-day project summary to Discord (commits in 24h, sync health,
+# dashboard link). Schedule: 09:07 Asia/Dhaka (03:07 UTC). Free webhook, no bot.
+# Gracefully skips when secret DISCORD_WEBHOOK_URL is absent.
+
+on:
+  schedule:
+    - cron: "7 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discord-digest
+  cancel-in-progress: false
+
+jobs:
+  pulse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Post daily pulse to Discord
+        env:
+          GH_TOKEN: ${{ secrets.GH_DASHBOARD_TOKEN }}
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SHEET_ID: ${{ vars.GDRIVE_SHEET_ID }}
+        run: python3 scripts/discord/discord_digest.py
