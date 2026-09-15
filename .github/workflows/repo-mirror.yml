@@ -1,0 +1,107 @@
+name: Repo Mirror
+
+# Central Google Drive mirror for every SyllabAI repository's default branch.
+# Replaces the per-repo google-drive-sync workflows on private repos, which
+# billed a 60-min-timeout job on every push to every branch; this runs in the
+# public ops repo where Actions minutes are free and unlimited.
+#
+# Two lanes:
+#   light  - every 30 min, repos up to MIRROR_HEAVY_MB (500 MB default)
+#   heavy  - Saturdays 02:23 UTC, every repo (incl. ~4 GB syllabai-pastpapers);
+#            also forced by dispatch input include_heavy, or explicit repos list
+# Destinations are unchanged from the per-repo workflows:
+#   gdrive:SyllabAI-GitHub/<repo>  (or pinned folder / shared drive via vars)
+# No credential found -> graceful notice, run succeeds as a no-op.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"     # light lane
+    - cron: "23 2 * * 6"       # heavy lane (weekly, Saturday)
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: "Comma-separated full names to mirror (empty = default selection)"
+        required: false
+        default: ""
+      include_heavy:
+        description: "Include >500 MB repos on this run"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-mirror
+  cancel-in-progress: false    # never truncate an in-flight mirror
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150      # headroom for the weekly heavy lane
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install rclone
+        run: |
+          curl -sSL --retry 3 -o /tmp/rclone.zip https://downloads.rclone.org/rclone-current-linux-amd64.zip
+          cd /tmp && unzip -o -q rclone.zip
+          sudo cp /tmp/rclone-*/rclone /usr/local/bin/rclone
+          sudo chmod 755 /usr/local/bin/rclone
+          rclone version | head -2
+
+      - name: Mirror repositories to Google Drive
+        env:
+          GH_TOKEN: ${{ secrets.GH_DASHBOARD_TOKEN }}
+          MIRROR_TOKEN: ${{ secrets.GH_DASHBOARD_TOKEN }}
+          OAUTH_BLOCK: ${{ secrets.GDRIVE_RCLONE_OAUTH }}
+          SA_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT }}
+          FOLDER_ID: ${{ vars.GDRIVE_FOLDER_ID }}
+          TEAM_DRIVE: ${{ vars.GDRIVE_TEAM_DRIVE }}
+          MIRROR_REPOS: ${{ github.event.inputs.repos }}
+          INCLUDE_HEAVY: ${{ github.event.inputs.include_heavy }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+          WEEKLY_CRON: "23 2 * * 6"
+        run: python3 scripts/mirror/repo_mirror.py
+
+      - name: Notify Discord on failure
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          wh = os.environ.get("WEBHOOK", "")
+          if not wh:
+              print("::notice::DISCORD_WEBHOOK_URL not set - failure alert skipped")
+              raise SystemExit(0)
+          fails = ""
+          try:
+              fails = open("/tmp/mirror_failures.txt").read().strip()
+          except Exception:
+              pass
+          desc = "The Drive mirror is out of date for the listed repos. Open the run for logs."
+          if fails:
+              desc += "\n```" + fails[:1500] + "```"
+          payload = {
+              "username": "SyllabAI Sync",
+              "embeds": [{
+                  "title": "\U0001F534 Repo Mirror — sync failed",
+                  "url": os.environ["RUN_URL"],
+                  "description": desc,
+                  "color": 15158332,
+                  "footer": {"text": "Repo Mirror · syllabai-ops · GitHub Actions"},
+              }],
+          }
+          req = urllib.request.Request(wh, data=json.dumps(payload).encode(),
+                                       headers={"Content-Type": "application/json",
+                                                "User-Agent": "SyllabAI-Notifier/1.0 (+https://github.com/SyllabAI)"})
+          try:
+              urllib.request.urlopen(req, timeout=15)
+              print("[OK] failure alert posted to Discord")
+          except Exception as e:
+              print(f"::notice::Discord webhook failed (non-fatal): {e}")
+          PY

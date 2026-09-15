@@ -246,8 +246,10 @@ def duration_min(run):
         return ""
 
 
-def health_of(runs):
-    """Emoji verdict from the repo's recent Google Drive Sync runs."""
+def health_of(runs, fresh_h=48, stale_h=168):
+    """Emoji verdict from recent sync runs - the repo's own "Google Drive Sync"
+    workflow, or the central Repo Mirror in syllabai-ops (30-min cadence,
+    judged with the tighter 2h/24h thresholds)."""
     if not runs:
         return "⚪ no runs"
     r0 = runs[0]
@@ -261,9 +263,9 @@ def health_of(runs):
     h = age_hours(iso_utc(ok.get("run_started_at") or ok["created_at"]))
     if h is None:
         return "🟡 unknown"
-    if h <= 48:
+    if h <= fresh_h:
         return "🟢 fresh"
-    if h <= 168:
+    if h <= stale_h:
         return "🟡 stale"
     return "🔴 stale"
 
@@ -349,18 +351,33 @@ def main():
     print(f"[OK] activity: {len(contrib)} contributors in last 30d")
 
     # ---- sync runs (last 25 per repo) + health inputs ----
-    run_rows, runs_by_repo = [], {}
+    # Central mirror (SyllabAI/syllabai-ops): repos without their own
+    # "Google Drive Sync" workflow get their health from Repo Mirror runs.
+    central_data = gh("/repos/SyllabAI/syllabai-ops/actions/runs", {"per_page": 30})
+    central_runs = [r for r in (central_data or {}).get("workflow_runs", [])
+                    if r.get("name") == "Repo Mirror"]
+    run_rows, runs_by_repo, central_only = [], {}, set()
     for repo in repos:
         full = repo["full_name"]
         data = gh(f"/repos/{full}/actions/runs", {"per_page": 30})
         runs = [r for r in data.get("workflow_runs", []) if r.get("name") == "Google Drive Sync"]
-        runs_by_repo[full] = runs
+        if runs:
+            runs_by_repo[full] = runs
+        else:
+            runs_by_repo[full] = central_runs
+            central_only.add(full)
         for r in runs[:25]:
             run_rows.append([repo["name"], r["status"], r.get("conclusion") or "-",
                              r.get("head_branch", ""), r.get("event", ""),
                              iso_utc(r.get("run_started_at") or r["created_at"]),
                              duration_min(r), f'=HYPERLINK("{r["html_url"]}","open")'])
-    print(f"[OK] sync runs: {len(run_rows)} rows")
+    for r in central_runs[:25]:
+        run_rows.append(["central — syllabai-ops (Repo Mirror)", r["status"],
+                         r.get("conclusion") or "-",
+                         r.get("head_branch", ""), r.get("event", ""),
+                         iso_utc(r.get("run_started_at") or r["created_at"]),
+                         duration_min(r), f'=HYPERLINK("{r["html_url"]}","open")'])
+    print(f"[OK] sync runs: {len(run_rows)} rows ({len(central_only)} repos on central mirror)")
 
     # ---- drive stats per repo folder + growth deltas vs State tab ----
     drive_map = {}
@@ -414,7 +431,7 @@ def main():
             lc_time = iso_utc(lc["commit"]["author"]["date"])
             lc_msg = safe(lc["commit"]["message"].splitlines()[0], 200)
         runs = runs_by_repo.get(full, [])
-        health = health_of(runs)
+        health = health_of(runs, 2, 24) if full in central_only else health_of(runs)
         s_status, s_time, s_url = "no runs yet", "-", ""
         if runs:
             r0 = runs[0]

@@ -48,7 +48,10 @@ def gh(path, params=None):
             time.sleep(2 ** (attempt + 1))
 
 
-def health(runs):
+def health(runs, fresh_h=48, stale_h=168):
+    # fresh_h/stale_h: freshness thresholds in hours. Daily per-repo sync
+    # workflows use the 48/168 defaults; the central Repo Mirror (30-min
+    # cadence) is judged much tighter (2h/24h).
     if not runs:
         return "⚪"
     r0 = runs[0]
@@ -65,7 +68,7 @@ def health(runs):
     except Exception:
         return "🟡"
     h = age.total_seconds() / 3600
-    return "🟢" if h <= 48 else ("🟡" if h <= 168 else "🔴")
+    return "🟢" if h <= fresh_h else ("🟡" if h <= stale_h else "🔴")
 
 
 def main():
@@ -79,6 +82,12 @@ def main():
     repos = gh("/user/repos", {"per_page": 100, "sort": "pushed",
                                "visibility": "all", "affiliation": "owner"}) or []
     since = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Central mirror runs (SyllabAI/syllabai-ops). Repos without their own
+    # "Google Drive Sync" workflow are mirrored by the 30-min Repo Mirror;
+    # their sync verdict falls back to that run history.
+    central_runs = [r for r in (gh("/repos/SyllabAI/syllabai-ops/actions/runs",
+                                   {"per_page": 15}) or {}).get("workflow_runs", [])
+                    if r.get("name") == "Repo Mirror"]
     fields, any_red = [], False
     total_commits = 0
     for repo in sorted(repos, key=lambda r: r["name"]):
@@ -89,7 +98,12 @@ def main():
         runs_data = gh(f"/repos/{full}/actions/runs", {"per_page": 15}) or {}
         runs = [r for r in runs_data.get("workflow_runs", [])
                 if r.get("name") == "Google Drive Sync"]
-        verdict = health(runs)
+        if runs:
+            verdict = health(runs)
+        elif central_runs:
+            verdict = health(central_runs, fresh_h=2, stale_h=24)
+        else:
+            verdict = "⚪"
         any_red = any_red or verdict in ("🔴",)
         last = ""
         if n:
@@ -102,6 +116,10 @@ def main():
         })
 
     desc = "Project state for the last 24 hours, straight from GitHub.\n"
+    if central_runs:
+        desc += ("\n🔄 Repos without their own sync workflow are mirrored "
+                 "every 30 min by the central [Repo Mirror]"
+                 "(https://github.com/SyllabAI/syllabai-ops/actions) in syllabai-ops.")
     if SHEET_ID:
         desc += (f"\n📊 [Open the full dashboard]"
                  f"(https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit)"
