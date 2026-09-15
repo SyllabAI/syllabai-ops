@@ -359,8 +359,16 @@ def main():
     run_rows, runs_by_repo, central_only = [], {}, set()
     for repo in repos:
         full = repo["full_name"]
-        data = gh(f"/repos/{full}/actions/runs", {"per_page": 30})
-        runs = [r for r in data.get("workflow_runs", []) if r.get("name") == "Google Drive Sync"]
+        # Own sync rows/health only when the repo still HAS an active own sync
+        # workflow - retired ones (core's deleted google-drive-sync) leave run
+        # history behind that must not read as current health.
+        wf = gh(f"/repos/{full}/actions/workflows") or {}
+        own = any(w.get("name") == "Google Drive Sync" and w.get("state") == "active"
+                  for w in wf.get("workflows", []))
+        runs = []
+        if own:
+            data = gh(f"/repos/{full}/actions/runs", {"per_page": 30})
+            runs = [r for r in data.get("workflow_runs", []) if r.get("name") == "Google Drive Sync"]
         if runs:
             runs_by_repo[full] = runs
         else:

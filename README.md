@@ -25,6 +25,10 @@ variables) — existing Drive folders keep working without migration.
 - **Skip list**: variable `MIRROR_SKIP` (default `syllabai-ops,syllabai-resources`)
   — ops doesn't mirror itself, and `syllabai-resources` keeps its own
   push-triggered sync (it's a public repo, so that mirror is free and fresher).
+- **Self-sync aware**: repos that still run their own active `Google Drive Sync`
+  workflow are auto-skipped (no double-syncing the same Drive destination).
+  When a repo's own workflow is retired (as `syllabai-core`'s was), the central
+  mirror picks it up automatically on the next run — no config change needed.
 - **Heavy repos** (> 500 MB, e.g. `syllabai-pastpapers` ≈ 4 GB) are deferred to
   the weekly heavy lane so the 30-min lane stays cheap. Force them earlier via
   *Run workflow* with `include_heavy` or an explicit `repos` list.

@@ -95,9 +95,17 @@ def main():
         commits = gh(f"/repos/{full}/commits", {"since": since, "per_page": 100}) or []
         n = len(commits) if isinstance(commits, list) else 0
         total_commits += n
-        runs_data = gh(f"/repos/{full}/actions/runs", {"per_page": 15}) or {}
-        runs = [r for r in runs_data.get("workflow_runs", [])
-                if r.get("name") == "Google Drive Sync"]
+        # Own sync verdict only when the repo still HAS an active own sync
+        # workflow - retired workflows (e.g. core's deleted google-drive-sync)
+        # leave run history behind that must not read as today's health.
+        wf = gh(f"/repos/{full}/actions/workflows") or {}
+        own = any(w.get("name") == "Google Drive Sync" and w.get("state") == "active"
+                  for w in wf.get("workflows", []))
+        runs = []
+        if own:
+            runs_data = gh(f"/repos/{full}/actions/runs", {"per_page": 15}) or {}
+            runs = [r for r in runs_data.get("workflow_runs", [])
+                    if r.get("name") == "Google Drive Sync"]
         if runs:
             verdict = health(runs)
         elif central_runs:

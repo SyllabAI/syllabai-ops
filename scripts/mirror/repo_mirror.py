@@ -21,9 +21,11 @@ Env:
   FOLDER_ID       optional Drive folder id to pin the destination (vars)
   TEAM_DRIVE      optional shared-drive id (vars, wins over FOLDER_ID)
   MIRROR_REPOS    optional comma list - mirror exactly these, ignore tiers
-  MIRROR_SKIP     optional comma list (default "syllabai-ops,syllabai-resources";
-                  ops is this repo itself, resources keeps its own push-triggered
-                  sync on a free public repo)
+  MIRROR_SKIP     optional comma list (default "syllabai-ops,syllabai-resources"):
+                  ops is this repo itself; resources keeps its own
+                  push-triggered sync on a free public repo. Repos that still
+                  run their own active "Google Drive Sync" workflow are
+                  auto-skipped regardless of this list.
   MIRROR_HEAVY_MB heavy-tier threshold in MB (default 500)
   INCLUDE_HEAVY   "true" forces the heavy set into this run (dispatch input)
   EVENT_SCHEDULE  raw cron of the triggering schedule event (set by workflow);
@@ -119,6 +121,16 @@ def heavy_lane() -> bool:
     return bool(EVENT_SCHEDULE) and EVENT_SCHEDULE.strip() == WEEKLY_CRON.strip()
 
 
+def own_sync_active(full: str) -> bool:
+    """True when the repo still runs its own active "Google Drive Sync"
+    workflow. Those repos self-sync on push and are skipped here to avoid
+    double-syncing the same Drive destination; when their own workflow is
+    retired, the central mirror picks them up automatically next run."""
+    wf = gh(f"/repos/{full}/actions/workflows") or {}
+    return any(w.get("name") == "Google Drive Sync" and w.get("state") == "active"
+               for w in wf.get("workflows", []))
+
+
 def select_repos():
     """Return (selected, deferred) repo dicts + lane annotation."""
     all_repos = list(gh_page("/user/repos", {
@@ -142,6 +154,9 @@ def select_repos():
             continue
         if name in MIRROR_SKIP or full in MIRROR_SKIP:
             print(f"[skip] {full}: skip list")
+            continue
+        if own_sync_active(full):
+            print(f"[skip] {full}: self-syncs (own workflow active)")
             continue
         mb = (r.get("size") or 0) / 1024.0
         if not heavy and mb > MIRROR_HEAVY_MB:
