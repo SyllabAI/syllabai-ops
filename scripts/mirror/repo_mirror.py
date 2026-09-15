@@ -210,7 +210,7 @@ def rclone_sync(src: str, dest: str, extra: list[str],
     """rclone sync with the quota-hint + shared-with-me retry of the old workflow."""
     base = ["rclone", "sync", src, dest] + EXCLUDES + extra + [
         "--transfers", "8", "--checkers", "16", "--fast-list",
-        "--stats-one-line", "--stats", "0", "-v"]
+        "--stats-one-line", "--stats", "30s", "-v"]
     with open(log, "w") as lf:
         try:
             p = subprocess.run(base, env={**os.environ, **renv},
@@ -243,15 +243,19 @@ def rclone_sync(src: str, dest: str, extra: list[str],
 
 
 def _last_stats(log: str) -> str:
-    """Pull the final one-line rclone stats for the summary table."""
+    """Pull the final rclone stats line for the summary table. Falls back to a
+    neutral verdict - rclone's transient retry chatter ("ERROR : Attempt 2/3
+    succeeded") must never masquerade as a failure detail."""
     try:
         lines = [ln for ln in open(log).read().splitlines() if ln.strip()]
-        for ln in reversed(lines):
-            if "Transferred:" in ln or "There was nothing to transfer" in ln:
-                return re.sub(r"\s+", " ", ln.strip())[:120]
-        return lines[-1][:120] if lines else "ok"
+        stats = [ln for ln in lines if "Transferred:" in ln]
+        if stats:
+            return re.sub(r"\s+", " ", stats[-1].strip())[:120]
+        retried = any("Attempt 2/3 succeeded" in ln or "Attempt 3/3 succeeded" in ln
+                      for ln in lines)
+        return "synced (rclone retried transient errors)" if retried else "synced"
     except Exception:
-        return "ok"
+        return "synced"
 
 
 def main() -> int:
