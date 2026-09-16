@@ -34,9 +34,14 @@ behavior: exit 1 after the Discord report whenever any check fails.
 **One operator step remains** (secrets are write-only — nobody can copy them
 via the API): add to *Settings → Secrets and variables → Actions*:
 
-1. `PILOT_MONITOR_EMAIL` — `pilot.monitor@syllabai-test.dev` (the TEST-class
-   monitor account; values are in the `syllabai-web` repo's secret list)
-2. `PILOT_MONITOR_PASSWORD` — its credentials
+1. `PILOT_MONITOR_EMAIL` — `pilot.monitor2@syllabai-test.dev` (the TEST-class
+   monitor account; **re-provisioned 2026-09-16** — the original
+   `pilot.monitor@…` password was lost with the session-59 delivery report, so
+   a fresh account was created via the same public register API path as
+   session-58; the probe is designed for a fresh learner, and the re-provisioned
+   account was verified against the real probe: 15/15 checks green locally)
+2. `PILOT_MONITOR_PASSWORD` — its credentials (issued with the account;
+   rotatable anytime via `POST /api/v1/auth/password`)
 3. `PILOT_TEACHER_EMAIL` / `PILOT_TEACHER_PASSWORD` — optional; unlock the
    teacher KG + activation checks
 

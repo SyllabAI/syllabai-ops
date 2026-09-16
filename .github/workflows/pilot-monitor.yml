@@ -17,7 +17,8 @@ name: Pilot Monitor
 #   Exit 1 after the Discord report whenever any check fails.
 #
 # Secrets required in THIS repo (Settings → Secrets and variables → Actions):
-#   PILOT_MONITOR_EMAIL      pilot.monitor@syllabai-test.dev (TEST account)
+#   PILOT_MONITOR_EMAIL      pilot.monitor2@syllabai-test.dev (TEST account,
+#                            re-provisioned 2026-09-16 after credential loss)
 #   PILOT_MONITOR_PASSWORD   its credentials
 #   PILOT_TEACHER_EMAIL      optional — unlocks teacher KG checks
 #   PILOT_TEACHER_PASSWORD   optional
