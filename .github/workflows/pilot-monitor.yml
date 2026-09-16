@@ -1,0 +1,78 @@
+name: Pilot Monitor
+
+# Pilot production monitoring, migrated 2026-09-16 (session 77) from the private
+# syllabai-web repo to this PUBLIC ops repo — same checks, same schedule, same
+# script (byte-identical copy; sha256 93379eaf…db8157), zero private Actions
+# minutes. This also RESTORES 6-hourly pilot monitoring during the Actions
+# quota blackout (the private-repo monitor has been quota-dead since
+# 2026-09-15 13:02 UTC, its schedule failing with jobs never started).
+#
+# What it checks (scripts/pilot_monitor/pilot_probe.py — DEPLOYMENT.md §4):
+#   backend health (cold-start tolerant), CORS preflight, auth-401, teacher
+#   route guard, deployed web-bundle markers, monitor-learner loop (subjects,
+#   practice list, recommendations policy, Smart Lesson v2), subject scoping,
+#   missing-param 400, cross-subject contamination, teacher concept-graph,
+#   class-analytics honesty, marking lane, weakness targeting, tutor LLM chain,
+#   weekly teacher-activation idempotency + the operator checklist.
+#   Exit 1 after the Discord report whenever any check fails.
+#
+# Secrets required in THIS repo (Settings → Secrets and variables → Actions):
+#   PILOT_MONITOR_EMAIL      pilot.monitor@syllabai-test.dev (TEST account)
+#   PILOT_MONITOR_PASSWORD   its credentials
+#   PILOT_TEACHER_EMAIL      optional — unlocks teacher KG checks
+#   PILOT_TEACHER_PASSWORD   optional
+#   DISCORD_WEBHOOK_URL      already present (shared with the digest)
+# Until the PILOT_MONITOR_* secrets are set, the preflight below fails closed
+# with an actionable message — pilot monitoring is visibly DOWN, not silently
+# skipped. Adding the secrets completes the cutover; the first scheduled run
+# then reports to Discord automatically.
+#
+# Schedules (identical to the retired web-repo workflow — the weekly operator
+# checklist keys off the exact "33 9 * * 0" string):
+#   */6h         — full probe set (read-only; teacher activation excluded)
+#   Sun 09:33 UTC — weekly ops run: adds idempotent re-activation verification
+#                   and the operator checklist to the Discord report.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+    - cron: "33 9 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pilot-monitor
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Secrets preflight (fail-closed)
+        env:
+          MONITOR_EMAIL: ${{ secrets.PILOT_MONITOR_EMAIL }}
+        run: |
+          if [ -z "$MONITOR_EMAIL" ]; then
+            echo "::error::PILOT_MONITOR_EMAIL / PILOT_MONITOR_PASSWORD (and optionally PILOT_TEACHER_*) are not set in SyllabAI/syllabai-ops secrets. The Pilot Monitor migrated here from syllabai-web on 2026-09-16 and cannot probe until the monitor-account secrets are added. See the 'Pilot Monitor cutover' section of this repo's README. Until then, pilot monitoring is DOWN — this failure is intentional (fail-closed), not a probe regression."
+            exit 1
+          fi
+          echo "monitor-account secrets present"
+
+      - uses: actions/checkout@v4
+
+      - name: Probe production pilot surfaces
+        env:
+          BACKEND_URL: https://syllabai-core.onrender.com
+          WEB_URL: https://syllabai-web.vercel.app
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          MONITOR_EMAIL: ${{ secrets.PILOT_MONITOR_EMAIL }}
+          MONITOR_PASSWORD: ${{ secrets.PILOT_MONITOR_PASSWORD }}
+          TEACHER_EMAIL: ${{ secrets.PILOT_TEACHER_EMAIL }}
+          TEACHER_PASSWORD: ${{ secrets.PILOT_TEACHER_PASSWORD }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/pilot_monitor/pilot_probe.py
