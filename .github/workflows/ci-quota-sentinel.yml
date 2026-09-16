@@ -1,0 +1,188 @@
+name: CI Quota Sentinel
+# Runs on the PUBLIC syllabai-ops repo => does NOT consume private-repo Actions quota.
+#
+# Context: free-plan minutes exhausted 2026-09-15 (core-ci #187 / web-ci #84 /
+# parser-ci #52 all failed with "The job was not started because recent account
+# payments have failed or your spending limit needs to be increased"). Billing
+# API is inaccessible with the current token (410/404 after the billing-platform
+# move), so availability is detected via a CANARY: rerun the parser-ci run and
+# read back whether its jobs actually started (no billing annotation = quota is
+# back). When blocked, the canary jobs never start => zero minutes consumed.
+#
+# Strategy:
+#   1. If all three pilot CI workflows are green on their default branch -> done, exit.
+#   2. Date guard: before PROBE_FROM (2026-09-27T06:00Z, account billing anchor
+#      = day 27) do nothing -- probing earlier is pure noise. Bypass with
+#      workflow_dispatch input force=true (e.g. after adding a payment method).
+#   3. Canary: rerun parser-ci's latest non-green run; wait 100s; read annotations.
+#      - billing annotation present -> still blocked, exit silently.
+#      - otherwise -> quota is back: rerun core-ci + web-ci too, ping Discord.
+#
+# Deploy-time secrets (set in syllabai-ops):
+#   CI_UNLOCK_TOKEN      : PAT able to read the 3 private repos + rerun their workflows
+#   DISCORD_WEBHOOK_URL  : standard notifier webhook
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Bypass the date guard and probe now (use after billing change)"
+        type: boolean
+        default: false
+
+permissions: {}
+
+env:
+  PROBE_FROM: "2026-09-27T06:00:00Z"
+
+jobs:
+  sentinel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Canary probe and unlock
+        env:
+          GH_TOKEN: ${{ secrets.CI_UNLOCK_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          python3 - <<'PY'
+          import json, os, time, urllib.request, urllib.error
+          from datetime import datetime, timezone
+
+          OWNER, API = "SyllabAI", "https://api.github.com"
+          UA = "SyllabAI-QuotaSentinel/2.0"
+          TOKEN = os.environ["GH_TOKEN"]
+          CANARY_REPO, CANARY_KEY = "syllabai-parser", "parser"
+          TARGETS = [("syllabai-core", "core"), ("syllabai-web", "web"), ("syllabai-parser", "parser")]
+
+          def api(method, path, body=None, timeout=30):
+              req = urllib.request.Request(API + path,
+                  data=json.dumps(body).encode() if body is not None else None, method=method)
+              req.add_header("User-Agent", UA)
+              req.add_header("Accept", "application/vnd.github+json")
+              req.add_header("Authorization", f"Bearer {TOKEN}")
+              if body is not None:
+                  req.add_header("Content-Type", "application/json")
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as r:
+                      raw = r.read().decode()
+                      return r.status, (json.loads(raw) if raw.strip() else {})
+              except urllib.error.HTTPError as e:
+                  return e.code, {}
+              except Exception:
+                  return 0, {}
+
+          def discord(title, desc, color):
+              hook = os.environ.get("DISCORD_WEBHOOK_URL", "")
+              if not hook:
+                  return
+              req = urllib.request.Request(hook, data=json.dumps({
+                  "username": "SyllabAI CI Sentinel",
+                  "embeds": [{"title": title, "description": desc, "color": color}]}).encode(),
+                  method="POST")
+              req.add_header("User-Agent", "SyllabAI-Notifier/1.0")
+              req.add_header("Content-Type", "application/json")
+              try:
+                  urllib.request.urlopen(req, timeout=20)
+              except Exception:
+                  pass
+
+          def pick(repo, key):
+              st, wfs = api("GET", f"/repos/{OWNER}/{repo}/actions/workflows?per_page=100")
+              return next((w for w in wfs.get("workflows", [])
+                           if w.get("state") == "active"
+                           and "ci" in (w["name"] + w["path"]).lower()
+                           and key in (w["name"] + w["path"]).lower()), None)
+
+          def latest(repo, wf):
+              st, meta = api("GET", f"/repos/{OWNER}/{repo}")
+              branch = meta.get("default_branch", "main") if st == 200 else "main"
+              st, runs = api("GET", f"/repos/{OWNER}/{repo}/actions/workflows/{wf['id']}/runs?branch={branch}&per_page=1")
+              runs = runs.get("workflow_runs", [])
+              return branch, (runs[0] if runs else None)
+
+          def jobs_billing_blocked(repo, run_id):
+              st, js = api("GET", f"/repos/{OWNER}/{repo}/actions/runs/{run_id}/jobs?per_page=20")
+              jobs = js.get("jobs", [])
+              if not jobs:
+                  return None  # unknown
+              for j in jobs:
+                  if j.get("steps"):  # any step executed => jobs are actually running
+                      return False
+              # zero steps everywhere: check first job's annotations for billing text
+              cr = jobs[0]["check_run_url"].rstrip("/").split("/")[-1]
+              st, anns = api("GET", f"/repos/{OWNER}/{repo}/check-runs/{cr}/annotations")
+              for a in anns if isinstance(anns, list) else []:
+                  if "not started because" in a.get("message", "").lower():
+                      return True
+              return None  # no steps but no billing note (e.g. queued too briefly)
+
+          # 1) cheap status pass -- exit if everything is already green
+          states = {}
+          for repo, key in TARGETS:
+              wf = pick(repo, key)
+              if not wf:
+                  print(f"[{repo}] no CI workflow matched '{key}'"); states[repo] = None; continue
+              branch, run = latest(repo, wf)
+              if run is None:
+                  states[repo] = "no-runs"
+              elif run["status"] != "completed":
+                  states[repo] = run["status"]
+              else:
+                  states[repo] = "green" if run.get("conclusion") == "success" else f"failed"
+              print(f"[{repo}] {states[repo]} (latest run #{run['run_number']})" if run else f"[{repo}] {states[repo]}")
+          if all(s == "green" for s in states.values()):
+              print("ALL PILOT CI GREEN - sentinel has nothing to do")
+              raise SystemExit(0)
+
+          # 2) date guard (bypassable via force input)
+          if os.environ.get("FORCE", "false") != "true":
+              now = datetime.now(timezone.utc)
+              if now < datetime.fromisoformat(os.environ["PROBE_FROM"].replace("Z", "+00:00")):
+                  print(f"before probe window ({os.environ['PROBE_FROM']}) - no probe, zero noise")
+                  raise SystemExit(0)
+          else:
+              print("force=true - bypassing date guard")
+
+          # 3) canary: rerun parser-ci, wait, read back whether jobs started
+          canary = pick(CANARY_REPO, CANARY_KEY)
+          branch, run = latest(CANARY_REPO, canary)
+          if run is None:
+              print("canary: no parser-ci run found"); raise SystemExit(0)
+          if run["status"] != "completed":
+              print(f"canary run #{run['run_number']} is already {run['status']} - quota likely back, wait for it")
+              raise SystemExit(0)
+          st, _ = api("POST", f"/repos/{OWNER}/{CANARY_REPO}/actions/runs/{run['id']}/rerun")
+          print(f"canary rerun of {CANARY_REPO} #{run['run_number']}: HTTP {st}")
+          if st not in (200, 201, 204):
+              print("canary rerun not accepted"); raise SystemExit(0)
+          time.sleep(100)
+          blocked = jobs_billing_blocked(CANARY_REPO, run["id"])
+          if blocked:
+              print("STILL BILLING-BLOCKED (annotation present, jobs never started) - silent exit")
+              raise SystemExit(0)
+          if blocked is None:
+              print("canary state unclear (no steps yet, no annotation) - assume not ready, retry next tick")
+              raise SystemExit(0)
+
+          # 4) quota is back -> fire the other two
+          fired = [f"{CANARY_REPO}: rerun #{run['run_number']} (canary)"]
+          for repo, key in TARGETS:
+              if repo == CANARY_REPO:
+                  continue
+              wf = pick(repo, key)
+              branch, r = latest(repo, wf)
+              if r is None or (r["status"] == "completed" and r.get("conclusion") == "success"):
+                  continue
+              if r["status"] != "completed":
+                  fired.append(f"{repo}: already {r['status']}"); continue
+              st, _ = api("POST", f"/repos/{OWNER}/{repo}/actions/runs/{r['id']}/rerun")
+              if st in (200, 201, 204):
+                  fired.append(f"{repo}: rerun #{r['run_number']}")
+              else:
+                  fired.append(f"{repo}: rerun HTTP {st}")
+          print("UNLOCKED - fired: " + "; ".join(fired))
+          discord("Quota back - pilot CI reruns fired",
+                  "\n".join(fired) + "\n\nNext: when all three are green, dispatch live r3.", 0x2ECC71)
+          PY
