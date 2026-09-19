@@ -21,11 +21,12 @@ Env:
   FOLDER_ID       optional Drive folder id to pin the destination (vars)
   TEAM_DRIVE      optional shared-drive id (vars, wins over FOLDER_ID)
   MIRROR_REPOS    optional comma list - mirror exactly these, ignore tiers
-  MIRROR_SKIP     optional comma list (default "syllabai-ops,syllabai-resources"):
-                  ops is this repo itself; resources keeps its own
-                  push-triggered sync on a free public repo. Repos that still
-                  run their own active "Google Drive Sync" workflow are
-                  auto-skipped regardless of this list.
+  MIRROR_SKIP     optional comma list (default ""): repos to never mirror.
+                  Since 2026-09-19 (owner request "all repos sync to Drive")
+                  syllabai-ops itself IS mirrored. Repos that still run their
+                  own active "Google Drive Sync" workflow are auto-skipped
+                  regardless of this list (Past-Papers, syllabai-pastpapers,
+                  syllabai-resources, syllabai-teacher-workbench).
   MIRROR_HEAVY_MB heavy-tier threshold in MB (default 500)
   INCLUDE_HEAVY   "true" forces the heavy set into this run (dispatch input)
   EVENT_SCHEDULE  raw cron of the triggering schedule event (set by workflow);
@@ -60,7 +61,7 @@ SA_JSON = os.environ.get("SA_JSON", "")
 FOLDER_ID = os.environ.get("FOLDER_ID", "")
 TEAM_DRIVE = os.environ.get("TEAM_DRIVE", "")
 MIRROR_REPOS = [x.strip() for x in os.environ.get("MIRROR_REPOS", "").split(",") if x.strip()]
-MIRROR_SKIP = [x.strip() for x in os.environ.get("MIRROR_SKIP", "syllabai-ops,syllabai-resources").split(",") if x.strip()]
+MIRROR_SKIP = [x.strip() for x in os.environ.get("MIRROR_SKIP", "").split(",") if x.strip()]
 MIRROR_HEAVY_MB = int(os.environ.get("MIRROR_HEAVY_MB", "500"))
 INCLUDE_HEAVY = os.environ.get("INCLUDE_HEAVY", "").strip().lower() in ("1", "true", "yes")
 EVENT_SCHEDULE = os.environ.get("EVENT_SCHEDULE", "")
