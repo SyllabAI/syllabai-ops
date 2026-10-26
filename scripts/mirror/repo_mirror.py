@@ -8,7 +8,7 @@ repos. One scheduled job mirrors every repository's default branch to
 existing Drive folders keep working).
 
 Two cadence lanes (see .github/workflows/repo-mirror.yml):
-  light  - every 30 min; repos up to MIRROR_HEAVY_MB (default 500 MB)
+  light  - every 30 min; repos up to MIRROR_HEAVY_MB (default 1024 MB)
   heavy  - weekly cron lane (or manual dispatch); every repo, including
            multi-GB ones (e.g. syllabai-pastpapers at ~4 GB)
 
@@ -27,7 +27,9 @@ Env:
                   own active "Google Drive Sync" workflow are auto-skipped
                   regardless of this list (Past-Papers, syllabai-pastpapers,
                   syllabai-resources, syllabai-teacher-workbench).
-  MIRROR_HEAVY_MB heavy-tier threshold in MB (default 500)
+  MIRROR_HEAVY_MB heavy-tier threshold in MB (default 1024; v2 crossed 500 on
+                  2026-10-25 and silently stopped syncing - see commit history)
+  RCLONE_TIMEOUT  per-repo rclone sync cap in seconds (default 9000 = 150 min)
   INCLUDE_HEAVY   "true" forces the heavy set into this run (dispatch input)
   EVENT_SCHEDULE  raw cron of the triggering schedule event (set by workflow);
                   equal to WEEKLY_CRON means the heavy lane
@@ -62,7 +64,7 @@ FOLDER_ID = os.environ.get("FOLDER_ID", "")
 TEAM_DRIVE = os.environ.get("TEAM_DRIVE", "")
 MIRROR_REPOS = [x.strip() for x in os.environ.get("MIRROR_REPOS", "").split(",") if x.strip()]
 MIRROR_SKIP = [x.strip() for x in os.environ.get("MIRROR_SKIP", "").split(",") if x.strip()]
-MIRROR_HEAVY_MB = int(os.environ.get("MIRROR_HEAVY_MB", "500"))
+MIRROR_HEAVY_MB = int(os.environ.get("MIRROR_HEAVY_MB", "1024"))
 INCLUDE_HEAVY = os.environ.get("INCLUDE_HEAVY", "").strip().lower() in ("1", "true", "yes")
 EVENT_SCHEDULE = os.environ.get("EVENT_SCHEDULE", "")
 WEEKLY_CRON = os.environ.get("WEEKLY_CRON", "23 2 * * 6")
@@ -71,7 +73,11 @@ SUMMARY_PATH = os.environ.get("GITHUB_STEP_SUMMARY", "")
 RESULTS_JSON = "/tmp/mirror_results.json"
 FAILURES_TXT = "/tmp/mirror_failures.txt"
 
-RCLONE_TIMEOUT = 60 * 60          # one huge repo may legitimately take a while
+# Per-repo sync cap. 150 min: multi-GB first seeds (3.9/7.0 GB experimental
+# repos) were killed at the old 60-min cap on 2026-10-22/24. Env-tunable so
+# the weekly heavy lane can be tuned without a code edit. rclone resumes
+# incrementally, so a cap kill loses at most one run's worth of progress.
+RCLONE_TIMEOUT = int(os.environ.get("RCLONE_TIMEOUT", str(150 * 60)))
 CLONE_TIMEOUT = 30 * 60
 EXCLUDES = ["--exclude", ".git/**", "--exclude", "node_modules/**",
             "--exclude", "__pycache__/**", "--exclude", ".venv/**",

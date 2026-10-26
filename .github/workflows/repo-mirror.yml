@@ -6,7 +6,7 @@ name: Repo Mirror
 # public ops repo where Actions minutes are free and unlimited.
 #
 # Two lanes:
-#   light  - every 30 min, repos up to MIRROR_HEAVY_MB (500 MB default)
+#   light  - every 30 min, repos up to MIRROR_HEAVY_MB (1 GB default)
 #   heavy  - Saturdays 02:23 UTC, every repo (incl. ~4 GB syllabai-pastpapers);
 #            also forced by dispatch input include_heavy, or explicit repos list
 # Destinations are unchanged from the per-repo workflows:
@@ -24,7 +24,7 @@ on:
         required: false
         default: ""
       include_heavy:
-        description: "Include >500 MB repos on this run"
+        description: "Include >1 GB repos on this run"
         type: boolean
         required: false
         default: false
@@ -39,7 +39,8 @@ concurrency:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    timeout-minutes: 150      # headroom for the weekly heavy lane
+    timeout-minutes: 360      # GitHub-hosted runner max; heavy lane may seed
+                              # multi-GB repos (per-repo cap RCLONE_TIMEOUT=150 min)
     steps:
       - name: Checkout
         uses: actions/checkout@v4
