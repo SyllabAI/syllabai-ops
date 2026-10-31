@@ -67,6 +67,15 @@ jobs:
           WEEKLY_CRON: "23 2 * * 6"
         run: python3 scripts/mirror/repo_mirror.py
 
+      - name: Upload rclone diagnostic logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rclone-logs-${{ github.run_id }}
+          path: mirror-logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
       - name: Notify Discord on failure
         if: failure()
         env:

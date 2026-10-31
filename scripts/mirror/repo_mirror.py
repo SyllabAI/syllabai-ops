@@ -85,6 +85,44 @@ EXCLUDES = ["--exclude", ".git/**", "--exclude", "node_modules/**",
 
 USER_AGENT = "syllabai-repo-mirror"
 
+# --- failure diagnostics (added 2026-10-31) ---
+# v2 failed 20 straight mirror runs with 'NOTICE: Failed to sync: Post
+# https://...' truncated to uselessness: the 160-char detail cap was consumed
+# by the googleapis upload URL, and the full rclone log was deleted together
+# with the workdir temp dir before anyone could read it.
+DIAG_DIR = os.path.join(os.environ.get("GITHUB_WORKSPACE") or "/tmp", "mirror-logs")
+os.makedirs(DIAG_DIR, exist_ok=True)
+URL_RE = re.compile(r'https?://\S+')
+INTERESTING_RE = re.compile(
+    r'ERROR|NOTICE|Failed|failed|googleapi|\b40[13]\b|\b429\b|quota|'
+    r'invalid_grant|Timed out|timeout|refused|reset by peer|broken pipe',
+    re.I)
+
+def _short(line: str) -> str:
+    """Collapse long URLs so error reasons survive the 160-char detail cap."""
+    return URL_RE.sub("<url>", line)
+
+def _print_diag(log: str, exit_code: int) -> str:
+    """Print the interesting part of a failed rclone log to stdout (visible in
+    the Actions log) and return a concise one-line failure reason."""
+    try:
+        lines = [ln for ln in open(log, encoding="utf-8", errors="replace").read().splitlines() if ln.strip()]
+    except OSError:
+        print(f"[diag] rclone log {log} is missing (no diagnostics available)")
+        return ""
+    print(f"[diag] rclone exit {exit_code}; log={log} ({len(lines)} lines); "
+          "interesting lines + raw tail follow")
+    inter = [ln for ln in lines if INTERESTING_RE.search(ln)]
+    shown = inter[-40:]
+    for ln in shown:
+        print("  |d| " + _short(ln)[:240])
+    for ln in lines[-10:]:
+        if ln not in shown:
+            print("  |t| " + _short(ln)[:240])
+    if inter:
+        return _short(inter[-1])[:160]
+    return _short(lines[-1])[:160] if lines else ""
+
 
 def gh(path, params=None):
     """GitHub GET with retry; returns None after 3 failed attempts."""
@@ -220,7 +258,7 @@ def clone(repo_full: str, default_branch: str, workdir: str) -> tuple[bool, str]
         if p.returncode == 0:
             return True, ""
         tail = (p.stderr or p.stdout or "").strip().splitlines()
-        return False, tail[-1][:160] if tail else f"git exit {p.returncode}"
+        return False, (_short(tail[-1])[:160] if tail else f"git exit {p.returncode}")
     except subprocess.TimeoutExpired:
         return False, f"clone timed out after {CLONE_TIMEOUT // 60} min"
     except Exception as e:
@@ -248,6 +286,15 @@ def rclone_sync(src: str, dest: str, extra: list[str],
         print("::error::Google blocks service-account uploads to personal My Drive. "
               "Fix: (A) Workspace Shared Drive -> SA as Content Manager + var "
               "GDRIVE_TEAM_DRIVE; or (B) OAuth -> secret GDRIVE_RCLONE_OAUTH.")
+    for marker, hint in (
+            ("invalid_grant", "OAuth token expired/revoked - regenerate "
+                              "GDRIVE_RCLONE_OAUTH via `rclone config reconnect`."),
+            ("rateLimitExceeded", "Drive rate limit - space out runs or cut --transfers."),
+            ("User rate limit exceeded", "Drive per-user rate limit - space out runs or cut --transfers."),
+            ("storageQuotaExceeded", "Drive storage quota exceeded - free space or raise the plan."),
+    ):
+        if marker in text:
+            print(f"::error::rclone failure hint: {marker} -> {hint}")
     if not extra:  # only the by-name fallback has a shared-with-me retry
         with open(log, "a") as lf:
             lf.write("\n-- retrying with --drive-shared-with-me --\n")
@@ -260,8 +307,11 @@ def rclone_sync(src: str, dest: str, extra: list[str],
                 return False, f"sync (retry) timed out after {RCLONE_TIMEOUT // 60} min"
         if p2.returncode == 0:
             return True, _last_stats(log) + " (shared-with-me)"
-    tail = [ln for ln in text.strip().splitlines() if ln.strip()]
-    return False, tail[-1][:160] if tail else f"rclone exit {p.returncode}"
+        code = p2.returncode
+    else:
+        code = p.returncode
+    reason = _print_diag(log, code)
+    return False, reason or f"rclone exit {code}"
 
 
 def _last_stats(log: str) -> str:
@@ -317,13 +367,13 @@ def main() -> int:
         full, name = r["full_name"], r["name"]
         mb = (r.get("size") or 0) / 1024.0
         workdir = tempfile.mkdtemp(prefix=f"mirror-{name}-")
+        rlog = os.path.join(DIAG_DIR, f"{name}-rclone.log")
         t0 = time.monotonic()
         ok, err = clone(full, r.get("default_branch") or "main", workdir)
         detail = ""
         if ok:
             dest, extra = dest_for(name)
-            ok, detail = rclone_sync(workdir, dest, extra, renv,
-                                     os.path.join(workdir, "rclone.log"))
+            ok, detail = rclone_sync(workdir, dest, extra, renv, rlog)
         else:
             detail = err
         shutil.rmtree(workdir, ignore_errors=True)
